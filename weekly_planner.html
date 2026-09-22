@@ -1112,14 +1112,43 @@ document.getElementById("todayBtn").addEventListener("click", () => {
 });
 
 /* ---------- Updates (desktop only, via pywebview) ---------- */
+// pywebview injects window.pywebview synchronously but wires up window.pywebview.api's
+// methods a beat later — so presence of window.pywebview.api is not enough, the actual
+// methods must exist too. This waits for "pywebviewready" (or resolves immediately if
+// everything is already wired up) with a timeout so a click never hangs forever.
+function apiIsReady() {
+  return !!(window.pywebview && window.pywebview.api &&
+    typeof window.pywebview.api.check_for_update === "function");
+}
+function whenApiReady(timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    if (apiIsReady()) { resolve(); return; }
+    let done = false;
+    const onReady = () => {
+      if (done) return;
+      if (apiIsReady()) { done = true; cleanup(); resolve(); }
+    };
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true; cleanup();
+      reject(new Error("Приложение ещё не готово (истекло время ожидания)."));
+    }, timeoutMs);
+    function cleanup() {
+      window.removeEventListener("pywebviewready", onReady);
+      clearTimeout(timer);
+    }
+    window.addEventListener("pywebviewready", onReady);
+  });
+}
 function isDesktop() {
-  return !!(window.pywebview && window.pywebview.api);
+  return !!window.pywebview; // any desktop context, regardless of api readiness yet
 }
 
 async function loadVersionBadge() {
   const badge = document.getElementById("versionBadge");
   if (!isDesktop()) { badge.textContent = ""; return; }
   try {
+    await whenApiReady();
     const v = await window.pywebview.api.get_version();
     badge.textContent = "v" + v;
   } catch (e) { badge.textContent = ""; }
@@ -1135,6 +1164,7 @@ updateBtn.addEventListener("click", async () => {
   updateBtn.disabled = true;
   updateBtn.textContent = "Проверка...";
   try {
+    await whenApiReady();
     const res = await window.pywebview.api.check_for_update();
     if (!res.ok) {
       alert("Не удалось проверить обновления:\n" + res.error);
@@ -1150,7 +1180,7 @@ updateBtn.addEventListener("click", async () => {
       window.pywebview.api.update_and_restart();
     }
   } catch (e) {
-    alert("Ошибка обновления: " + e);
+    alert("Ошибка обновления: " + (e && e.message ? e.message : e));
   } finally {
     updateBtn.disabled = false;
     updateBtn.textContent = originalLabel;
@@ -1160,11 +1190,10 @@ updateBtn.addEventListener("click", async () => {
 function initDesktopIntegration() {
   loadVersionBadge();
 }
-if (window.pywebview) {
-  initDesktopIntegration();
-} else {
-  window.addEventListener("pywebviewready", initDesktopIntegration);
-}
+// Always listen for the readiness event — it's the only reliable signal that
+// window.pywebview.api's methods actually exist, not just the api object itself.
+window.addEventListener("pywebviewready", initDesktopIntegration);
+if (apiIsReady()) initDesktopIntegration();
 
 /* ---------- Init ---------- */
 buildSkeleton();
