@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 
 import webview
 
@@ -56,6 +57,56 @@ BASE_DIR = get_base_dir()          # where git fetch/pull run — must be (in) t
 RESOURCE_DIR = get_resource_dir()  # where the bundled html/version.json actually are
 HTML_PATH = os.path.join(RESOURCE_DIR, "weekly_planner.html")
 VERSION_PATH = os.path.join(RESOURCE_DIR, "version.json")
+
+# Local, per-machine state (tasks/categories per profile). Lives next to the app,
+# NOT tracked by git (see .gitignore) — a `git pull` must never touch this data.
+PROFILES_DIR = os.path.join(BASE_DIR, "profiles")
+PROFILES_INDEX_PATH = os.path.join(PROFILES_DIR, "index.json")
+DEFAULT_PROFILE_ID = "default"
+
+
+def _ensure_profiles_dir():
+    os.makedirs(PROFILES_DIR, exist_ok=True)
+
+
+def _profile_path(profile_id):
+    safe = "".join(c for c in profile_id if c.isalnum() or c in "-_") or DEFAULT_PROFILE_ID
+    return os.path.join(PROFILES_DIR, f"{safe}.json")
+
+
+def _load_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _save_json(path, data):
+    _ensure_profiles_dir()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _load_index():
+    _ensure_profiles_dir()
+    if not os.path.exists(PROFILES_INDEX_PATH):
+        index = {
+            "activeProfileId": DEFAULT_PROFILE_ID,
+            "profiles": [{"id": DEFAULT_PROFILE_ID, "name": "По умолчанию"}],
+        }
+        _save_json(PROFILES_INDEX_PATH, index)
+        _save_json(_profile_path(DEFAULT_PROFILE_ID),
+                   {"name": "По умолчанию", "categories": [], "tasks": []})
+        return index
+    index = _load_json(PROFILES_INDEX_PATH, None)
+    if not index or not index.get("profiles"):
+        index = {
+            "activeProfileId": DEFAULT_PROFILE_ID,
+            "profiles": [{"id": DEFAULT_PROFILE_ID, "name": "По умолчанию"}],
+        }
+        _save_json(PROFILES_INDEX_PATH, index)
+    return index
 
 
 class Api:
@@ -101,6 +152,73 @@ class Api:
             return {"ok": False, "error": "Превышено время ожидания git fetch."}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    # ---------- Profiles (local state) ----------
+
+    def list_profiles(self):
+        index = _load_index()
+        return {"ok": True, "profiles": index["profiles"], "activeProfileId": index["activeProfileId"]}
+
+    def get_profile(self, profile_id):
+        data = _load_json(_profile_path(profile_id), {"name": profile_id, "categories": [], "tasks": []})
+        return {"ok": True, "data": data}
+
+    def save_profile(self, profile_id, data):
+        try:
+            _save_json(_profile_path(profile_id), data)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def create_profile(self, name):
+        name = (name or "").strip() or "Без названия"
+        index = _load_index()
+        new_id = uuid.uuid4().hex[:8]
+        index["profiles"].append({"id": new_id, "name": name})
+        index["activeProfileId"] = new_id
+        _save_json(PROFILES_INDEX_PATH, index)
+        _save_json(_profile_path(new_id), {"name": name, "categories": [], "tasks": []})
+        return {"ok": True, "id": new_id}
+
+    def rename_profile(self, profile_id, name):
+        name = (name or "").strip()
+        if not name:
+            return {"ok": False, "error": "Имя не может быть пустым."}
+        index = _load_index()
+        found = False
+        for p in index["profiles"]:
+            if p["id"] == profile_id:
+                p["name"] = name
+                found = True
+        if not found:
+            return {"ok": False, "error": "Профиль не найден."}
+        _save_json(PROFILES_INDEX_PATH, index)
+        data = _load_json(_profile_path(profile_id), {"categories": [], "tasks": []})
+        data["name"] = name
+        _save_json(_profile_path(profile_id), data)
+        return {"ok": True}
+
+    def delete_profile(self, profile_id):
+        index = _load_index()
+        if len(index["profiles"]) <= 1:
+            return {"ok": False, "error": "Нельзя удалить последний профиль."}
+        index["profiles"] = [p for p in index["profiles"] if p["id"] != profile_id]
+        if index["activeProfileId"] == profile_id:
+            index["activeProfileId"] = index["profiles"][0]["id"]
+        _save_json(PROFILES_INDEX_PATH, index)
+        try:
+            os.remove(_profile_path(profile_id))
+        except FileNotFoundError:
+            pass
+        return {"ok": True, "activeProfileId": index["activeProfileId"]}
+
+    def set_active_profile(self, profile_id):
+        index = _load_index()
+        if not any(p["id"] == profile_id for p in index["profiles"]):
+            return {"ok": False, "error": "Профиль не найден."}
+        index["activeProfileId"] = profile_id
+        _save_json(PROFILES_INDEX_PATH, index)
+        return {"ok": True}
 
     def update_and_restart(self):
         """Pulls latest changes and relaunches the whole process."""

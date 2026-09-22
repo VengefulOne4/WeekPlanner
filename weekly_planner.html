@@ -406,6 +406,46 @@
     padding: 1px 5px;
     flex-shrink: 0;
   }
+  .active-tag {
+    font-size: 10px;
+    color: #fff;
+    background: var(--accent);
+    border-radius: 4px;
+    padding: 1px 5px;
+    flex-shrink: 0;
+  }
+  .profile-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .profile-row input[type="text"] { flex: 1; }
+  .profile-row button.switch {
+    flex-shrink: 0;
+    padding: 5px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: #0f1115;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .profile-row button.switch:hover { border-color: var(--accent); }
+  .profile-row button.del {
+    background: none;
+    border: none;
+    color: var(--danger);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 6px;
+    flex-shrink: 0;
+  }
+  .profile-row button.del:hover { color: #ff8080; }
+  .profile-row button.del:disabled {
+    color: var(--muted);
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
   .cat-add-row {
     display: flex;
     align-items: center;
@@ -437,6 +477,7 @@
   <button id="nextWeek">След. неделя →</button>
   <button id="todayBtn">Сегодня</button>
   <button id="manageCatsBtn">Категории</button>
+  <button id="profilesBtn" style="display:none;">Профиль: <span id="activeProfileLabel"></span></button>
   <button id="updateBtn">Проверить обновления</button>
 </div>
 
@@ -521,11 +562,31 @@
   </div>
 </div>
 
+<div class="overlay" id="profileOverlay">
+  <div class="modal">
+    <h3>Профили</h3>
+    <div class="subtitle" style="margin-bottom:10px;">Каждый профиль хранит свои задачи, категории и ставку отдельно. Данные локальные, хранятся рядом с приложением.</div>
+    <div class="cat-list" id="profileList"></div>
+    <div class="cat-add-row">
+      <input type="text" id="newProfileName" placeholder="Новый профиль">
+      <button id="addProfileBtn">+</button>
+    </div>
+    <div class="modal-actions">
+      <button id="profileDoneBtn" class="primary">Готово</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const ROWH = 60;          // px per hour == 1px per minute
 const DAY_HEIGHT = 24 * ROWH;
 const SNAP = 5;            // click-to-place snapping, minutes
 const DAY_NAMES = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"];
+
+/* ---------- Profiles (desktop only — local JSON files via pywebview) ---------- */
+let activeProfileId = null;
+let activeProfileName = "";
+let profilesCache = [];
 
 /* ---------- Categories ---------- */
 const CATEGORIES_KEY = "weekly_planner_categories_v1";
@@ -556,9 +617,7 @@ function loadCategories() {
   } catch (e) {}
   return ensureWorkCategory(DEFAULT_CATEGORIES.map(c => ({ ...c })));
 }
-function saveCategories() {
-  localStorage.setItem(CATEGORIES_KEY, JSON.stringify(CATEGORIES));
-}
+function saveCategories() { persistAll(); }
 let CATEGORIES = loadCategories();
 function categoryById(id) {
   return CATEGORIES.find(c => c.id === id) || CATEGORIES[0] || { color: "#8b909c", label: "Без категории" };
@@ -601,10 +660,23 @@ function loadTasks() {
     return Array.isArray(t) ? t : [];
   } catch (e) { return []; }
 }
-function saveTasks() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
-}
+function saveTasks() { persistAll(); }
 let tasks = loadTasks();
+
+// Writes go to localStorage always (instant, works in a plain browser too),
+// and — in the desktop app, once a profile is active — to that profile's
+// JSON file on disk, which is the durable, per-profile source of truth there.
+function persistAll() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
+  localStorage.setItem(CATEGORIES_KEY, JSON.stringify(CATEGORIES));
+  if (isDesktop() && activeProfileId && apiIsReady()) {
+    window.pywebview.api.save_profile(activeProfileId, {
+      name: activeProfileName || "Профиль",
+      categories: CATEGORIES,
+      tasks: tasks,
+    }).catch(() => {});
+  }
+}
 function genId() {
   return "t_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
@@ -1162,6 +1234,152 @@ async function loadVersionBadge() {
   } catch (e) { badge.textContent = ""; }
 }
 
+/* ---------- Profile management ---------- */
+function applyProfileData(data) {
+  tasks = Array.isArray(data.tasks) ? data.tasks : [];
+  const cats = Array.isArray(data.categories) && data.categories.length
+    ? data.categories
+    : DEFAULT_CATEGORIES.map(c => ({ ...c }));
+  CATEGORIES = ensureWorkCategory(cats);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
+  localStorage.setItem(CATEGORIES_KEY, JSON.stringify(CATEGORIES));
+  buildLegend();
+  refreshAll();
+}
+
+async function switchProfile(id) {
+  await whenApiReady();
+  await window.pywebview.api.set_active_profile(id);
+  const info = profilesCache.find(p => p.id === id);
+  activeProfileId = id;
+  activeProfileName = info ? info.name : "Профиль";
+  const res = await window.pywebview.api.get_profile(id);
+  applyProfileData(res.data || {});
+  document.getElementById("activeProfileLabel").textContent = activeProfileName;
+}
+
+async function initProfiles() {
+  try {
+    await whenApiReady();
+    const list = await window.pywebview.api.list_profiles();
+    if (!list.ok) return;
+    profilesCache = list.profiles;
+    activeProfileId = list.activeProfileId;
+    const active = profilesCache.find(p => p.id === activeProfileId) || profilesCache[0];
+    activeProfileName = active ? active.name : "Профиль";
+
+    const profileRes = await window.pywebview.api.get_profile(activeProfileId);
+    const data = profileRes.data || {};
+    const hasFileData = (Array.isArray(data.tasks) && data.tasks.length) ||
+                         (Array.isArray(data.categories) && data.categories.length);
+
+    if (hasFileData) {
+      applyProfileData(data);
+    } else {
+      // Brand-new/empty profile: carry over whatever was already entered in
+      // this browser session (localStorage) so nothing gets lost on first run.
+      persistAll();
+    }
+
+    document.getElementById("activeProfileLabel").textContent = activeProfileName;
+    document.getElementById("profilesBtn").style.display = "inline-block";
+  } catch (e) {
+    // No desktop bridge (or it never became ready) — stay on localStorage-only mode.
+  }
+}
+
+const profileOverlay = document.getElementById("profileOverlay");
+const profileListEl = document.getElementById("profileList");
+const newProfileNameInput = document.getElementById("newProfileName");
+
+async function refreshProfilesCache() {
+  const res = await window.pywebview.api.list_profiles();
+  if (res.ok) {
+    profilesCache = res.profiles;
+    activeProfileId = res.activeProfileId;
+  }
+}
+
+function renderProfileList() {
+  profileListEl.innerHTML = "";
+  profilesCache.forEach(p => {
+    const row = document.createElement("div");
+    row.className = "profile-row";
+    const isActive = p.id === activeProfileId;
+    row.innerHTML = `
+      <input type="text" value="${escapeHtml(p.name)}">
+      ${isActive ? `<span class="active-tag">активен</span>` : `<button class="switch">Открыть</button>`}
+      <button class="del" title="Удалить" ${profilesCache.length <= 1 ? "disabled" : ""}>✕</button>
+    `;
+    const nameInput = row.querySelector('input[type="text"]');
+    const switchBtn = row.querySelector(".switch");
+    const delBtn = row.querySelector(".del");
+
+    nameInput.addEventListener("change", async () => {
+      const val = nameInput.value.trim();
+      if (!val) { nameInput.value = p.name; return; }
+      await whenApiReady();
+      const res = await window.pywebview.api.rename_profile(p.id, val);
+      if (res.ok) {
+        p.name = val;
+        if (p.id === activeProfileId) {
+          activeProfileName = val;
+          document.getElementById("activeProfileLabel").textContent = val;
+        }
+      }
+    });
+
+    if (switchBtn) {
+      switchBtn.addEventListener("click", async () => {
+        await switchProfile(p.id);
+        renderProfileList();
+      });
+    }
+
+    delBtn.addEventListener("click", async () => {
+      if (profilesCache.length <= 1) return;
+      if (!confirm(`Удалить профиль «${p.name}»? Данные будут удалены безвозвратно.`)) return;
+      await whenApiReady();
+      const delRes = await window.pywebview.api.delete_profile(p.id);
+      if (!delRes.ok) { alert(delRes.error || "Не удалось удалить профиль."); return; }
+      await refreshProfilesCache();
+      if (delRes.activeProfileId && delRes.activeProfileId !== p.id) {
+        await switchProfile(delRes.activeProfileId);
+      }
+      renderProfileList();
+    });
+
+    profileListEl.appendChild(row);
+  });
+}
+
+document.getElementById("profilesBtn").addEventListener("click", async () => {
+  try {
+    await whenApiReady();
+    await refreshProfilesCache();
+    renderProfileList();
+    newProfileNameInput.value = "";
+    profileOverlay.classList.add("open");
+  } catch (e) {
+    alert("Профили доступны только в десктопной версии приложения.");
+  }
+});
+document.getElementById("profileDoneBtn").addEventListener("click", () => profileOverlay.classList.remove("open"));
+profileOverlay.addEventListener("click", (e) => { if (e.target === profileOverlay) profileOverlay.classList.remove("open"); });
+
+document.getElementById("addProfileBtn").addEventListener("click", async () => {
+  const name = newProfileNameInput.value.trim();
+  if (!name) { newProfileNameInput.focus(); return; }
+  await whenApiReady();
+  const res = await window.pywebview.api.create_profile(name);
+  if (!res.ok) { alert("Не удалось создать профиль."); return; }
+  await refreshProfilesCache();
+  await switchProfile(res.id);
+  newProfileNameInput.value = "";
+  renderProfileList();
+});
+newProfileNameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") document.getElementById("addProfileBtn").click(); });
+
 const updateBtn = document.getElementById("updateBtn");
 updateBtn.addEventListener("click", async () => {
   if (!isDesktop()) {
@@ -1195,8 +1413,12 @@ updateBtn.addEventListener("click", async () => {
   }
 });
 
+let desktopInitialized = false;
 function initDesktopIntegration() {
+  if (desktopInitialized) return;
+  desktopInitialized = true;
   loadVersionBadge();
+  initProfiles();
 }
 // Always listen for the readiness event — it's the only reliable signal that
 // window.pywebview.api's methods actually exist, not just the api object itself.
