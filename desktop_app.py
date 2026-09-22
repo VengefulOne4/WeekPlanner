@@ -24,9 +24,38 @@ import sys
 
 import webview
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-HTML_PATH = os.path.join(BASE_DIR, "weekly_planner.html")
-VERSION_PATH = os.path.join(BASE_DIR, "version.json")
+
+def get_base_dir():
+    """The real, persistent folder the app lives in — used for git operations.
+
+    When run as `python desktop_app.py`, this is just the script's own folder.
+    When packaged with PyInstaller, sys.executable points at the actual .exe
+    on disk (its containing folder, e.g. dist/desktop_app/), which is what we
+    want git commands to run in. This is deliberately NOT the same as a
+    one-file build's temp extraction folder (sys._MEIPASS) — that folder is
+    thrown away and recreated on every launch, so it can never be a git repo.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def get_resource_dir():
+    """Folder to load bundled files (weekly_planner.html, version.json) from.
+
+    PyInstaller extracts --add-data files into sys._MEIPASS at runtime for
+    both --onefile and --onedir builds; when not frozen, that's just the
+    script's own folder.
+    """
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return sys._MEIPASS
+    return get_base_dir()
+
+
+BASE_DIR = get_base_dir()          # where git fetch/pull run — must be (in) the repo
+RESOURCE_DIR = get_resource_dir()  # where the bundled html/version.json actually are
+HTML_PATH = os.path.join(RESOURCE_DIR, "weekly_planner.html")
+VERSION_PATH = os.path.join(RESOURCE_DIR, "version.json")
 
 
 class Api:
@@ -99,6 +128,8 @@ def main():
         print(f"pywebview {webview.__version__}, платформа: {sys.platform}")
     except Exception:
         pass
+    print(f"BASE_DIR (git): {BASE_DIR}")
+    print(f"RESOURCE_DIR (html/version): {RESOURCE_DIR}")
 
     api = Api()
     webview.create_window(
