@@ -1120,24 +1120,32 @@ function apiIsReady() {
   return !!(window.pywebview && window.pywebview.api &&
     typeof window.pywebview.api.check_for_update === "function");
 }
-function whenApiReady(timeoutMs = 5000) {
+// Some pywebview builds/backends (older Windows setups without WebView2, in
+// particular) either fire "pywebviewready" without the api actually being
+// bound yet, or don't fire it reliably at all. So instead of trusting the
+// event alone, this polls for the real method to show up, and only gives up
+// after a generous timeout.
+function whenApiReady(timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
     if (apiIsReady()) { resolve(); return; }
-    let done = false;
-    const onReady = () => {
-      if (done) return;
-      if (apiIsReady()) { done = true; cleanup(); resolve(); }
-    };
-    const timer = setTimeout(() => {
-      if (done) return;
-      done = true; cleanup();
-      reject(new Error("Приложение ещё не готово (истекло время ожидания)."));
-    }, timeoutMs);
-    function cleanup() {
-      window.removeEventListener("pywebviewready", onReady);
-      clearTimeout(timer);
-    }
-    window.addEventListener("pywebviewready", onReady);
+    const start = Date.now();
+    const interval = setInterval(() => {
+      if (apiIsReady()) {
+        clearInterval(interval);
+        resolve();
+      } else if (Date.now() - start > timeoutMs) {
+        clearInterval(interval);
+        const hasWindow = !!window.pywebview;
+        const hasApi = !!(window.pywebview && window.pywebview.api);
+        const apiKeys = hasApi ? Object.keys(window.pywebview.api).join(", ") || "(пусто)" : "—";
+        reject(new Error(
+          "Мост к приложению не отвечает.\n" +
+          `window.pywebview: ${hasWindow ? "есть" : "нет"}, api: ${hasApi ? "есть" : "нет"}, методы: ${apiKeys}.\n` +
+          "Похоже, не установлен WebView2 Runtime (Windows) или используется устаревший движок. " +
+          "Запустите приложение с debug=True и откройте консоль (ПКМ → Inspect) для деталей."
+        ));
+      }
+    }, 200);
   });
 }
 function isDesktop() {
