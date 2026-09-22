@@ -76,6 +76,34 @@
     flex-shrink: 0;
   }
 
+  .earnings-panel {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+  .earnings-tile {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 16px;
+    min-width: 150px;
+  }
+  .earnings-tile .label {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 2px;
+  }
+  .earnings-tile .value {
+    font-size: 18px;
+    font-weight: 600;
+  }
+  .earnings-tile .sub {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
   /* Calendar */
   .cal-wrap {
     border: 1px solid var(--border);
@@ -183,6 +211,28 @@
     padding: 1px 2px;
   }
   .task-block .del:hover { color: #ff8080; }
+  .task-block .toggle {
+    position: absolute;
+    top: 1px;
+    right: 18px;
+    background: none;
+    border: none;
+    color: var(--text);
+    opacity: 0.6;
+    cursor: pointer;
+    font-size: 10px;
+    line-height: 1;
+    padding: 1px 2px;
+  }
+  .task-block .toggle:hover { opacity: 1; }
+  .task-block.task-disabled {
+    opacity: 0.45;
+    background-image: repeating-linear-gradient(
+      45deg, rgba(255,255,255,0.06), rgba(255,255,255,0.06) 4px,
+      transparent 4px, transparent 8px
+    );
+  }
+  .task-block.task-disabled .txt { text-decoration: line-through; }
   .task-block.seg-cont-out {
     border-bottom: 2px dashed rgba(255,255,255,0.35);
     border-bottom-left-radius: 0;
@@ -322,6 +372,40 @@
     flex-shrink: 0;
   }
   .cat-row button.del:hover { color: #ff8080; }
+  .cat-row button.del:disabled {
+    color: var(--muted);
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+  .cat-rate-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-left: 40px;
+    margin-top: -2px;
+  }
+  .cat-rate-row label {
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .cat-rate-row input {
+    width: 90px;
+    background: #0f1115;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 5px 7px;
+    border-radius: 6px;
+    font-size: 12px;
+  }
+  .fixed-tag {
+    font-size: 10px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    flex-shrink: 0;
+  }
   .cat-add-row {
     display: flex;
     align-items: center;
@@ -344,7 +428,7 @@
 </head>
 <body>
 
-<h1>Недельное расписание</h1>
+<h1>Недельное расписание <span id="versionBadge" style="font-size:12px;color:var(--muted);font-weight:400;"></span></h1>
 <div class="subtitle">Клик по расписанию — добавить задачу в это время (можно с точностью до минуты). Клик по задаче — редактировать.</div>
 
 <div class="toolbar">
@@ -353,9 +437,23 @@
   <button id="nextWeek">След. неделя →</button>
   <button id="todayBtn">Сегодня</button>
   <button id="manageCatsBtn">Категории</button>
+  <button id="updateBtn">Проверить обновления</button>
 </div>
 
 <div class="legend" id="legend"></div>
+
+<div class="earnings-panel" id="earningsPanel">
+  <div class="earnings-tile">
+    <div class="label">Заработок за неделю</div>
+    <div class="value" id="weekEarningsValue">0 €</div>
+    <div class="sub" id="weekEarningsHours"></div>
+  </div>
+  <div class="earnings-tile">
+    <div class="label">Оценка за 4 недели</div>
+    <div class="value" id="monthEarningsValue">0 €</div>
+    <div class="sub">неделя × 4</div>
+  </div>
+</div>
 
 <div class="cal-wrap">
   <div class="cal-header" id="calHeader"></div>
@@ -395,6 +493,11 @@
       <div class="end-hint" id="endHint"></div>
     </div>
 
+    <label style="display:flex;align-items:center;gap:8px;margin-top:14px;cursor:pointer;">
+      <input type="checkbox" id="taskDisabled" style="width:auto;">
+      <span style="color:var(--text);font-size:13px;">Отключить (не учитывать в расчётах)</span>
+    </label>
+
     <div class="modal-actions">
       <button id="deleteBtn" style="display:none;color:var(--danger);border-color:var(--danger);">Удалить</button>
       <button id="cancelBtn">Отмена</button>
@@ -426,8 +529,9 @@ const DAY_NAMES = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"];
 
 /* ---------- Categories ---------- */
 const CATEGORIES_KEY = "weekly_planner_categories_v1";
+const WORK_CATEGORY_ID = "work";
 const DEFAULT_CATEGORIES = [
-  { id: "work",   label: "Работа",  color: "#5b8cff" },
+  { id: "work",   label: "Работа",  color: "#5b8cff", fixed: true, hourlyRate: 0 },
   { id: "study",  label: "Учёба",   color: "#9b6bff" },
   { id: "sleep",  label: "Сон",     color: "#4a5568" },
   { id: "sport",  label: "Спорт",   color: "#ff8a5c" },
@@ -435,12 +539,22 @@ const DEFAULT_CATEGORIES = [
   { id: "personal", label: "Личное", color: "#ffd15c" },
   { id: "other",  label: "Другое",  color: "#8b909c" },
 ];
+function ensureWorkCategory(list) {
+  const work = list.find(c => c.id === WORK_CATEGORY_ID);
+  if (work) {
+    work.fixed = true;
+    if (typeof work.hourlyRate !== "number" || isNaN(work.hourlyRate)) work.hourlyRate = 0;
+  } else {
+    list.unshift({ id: WORK_CATEGORY_ID, label: "Работа", color: "#5b8cff", fixed: true, hourlyRate: 0 });
+  }
+  return list;
+}
 function loadCategories() {
   try {
     const stored = JSON.parse(localStorage.getItem(CATEGORIES_KEY));
-    if (Array.isArray(stored) && stored.length) return stored;
+    if (Array.isArray(stored) && stored.length) return ensureWorkCategory(stored);
   } catch (e) {}
-  return DEFAULT_CATEGORIES.map(c => ({ ...c }));
+  return ensureWorkCategory(DEFAULT_CATEGORIES.map(c => ({ ...c })));
 }
 function saveCategories() {
   localStorage.setItem(CATEGORIES_KEY, JSON.stringify(CATEGORIES));
@@ -534,6 +648,39 @@ function segmentsForColumn(d) {
   });
 
   return segs;
+}
+
+function workCategory() {
+  return CATEGORIES.find(c => c.id === WORK_CATEGORY_ID) || { hourlyRate: 0 };
+}
+
+// Sums the actual duration of non-disabled "Работа" tasks whose start date
+// falls in the currently displayed week (segments split across midnight are
+// just a visual split of the same task, so this uses task.duration directly).
+function weekWorkMinutes() {
+  if (!weekDates.length) return 0;
+  const weekDateStrs = new Set(weekDates.map(isoDate));
+  return tasks
+    .filter(t => t.category === WORK_CATEGORY_ID && !t.disabled && weekDateStrs.has(t.date))
+    .reduce((sum, t) => sum + t.duration, 0);
+}
+
+function updateEarningsPanel() {
+  const rate = workCategory().hourlyRate || 0;
+  const minutes = weekWorkMinutes();
+  const hours = minutes / 60;
+  const weekEarnings = hours * rate;
+  const monthEarnings = weekEarnings * 4;
+
+  const fmtMoney = (n) => n.toLocaleString("ru-RU", { maximumFractionDigits: 2, minimumFractionDigits: 0 }) + " €";
+  const fmtHours = (h) => {
+    const wh = Math.floor(h), wm = Math.round((h - wh) * 60);
+    return `${wh} ч ${wm} мин работы, ${rate} €/ч`;
+  };
+
+  document.getElementById("weekEarningsValue").textContent = fmtMoney(weekEarnings);
+  document.getElementById("weekEarningsHours").textContent = fmtHours(hours);
+  document.getElementById("monthEarningsValue").textContent = fmtMoney(monthEarnings);
 }
 
 function pad2(n) { return String(n).padStart(2, "0"); }
@@ -638,6 +785,7 @@ function buildGrid() {
     const laidOut = layoutDay(segmentsForColumn(d));
     laidOut.forEach(seg => renderSegment(col, seg));
   }
+  updateEarningsPanel();
 }
 
 function fullEndLabel(t) {
@@ -660,6 +808,7 @@ function renderSegment(col, seg) {
   div.className = "task-block";
   if (!seg.isHead) div.classList.add("seg-cont-in");
   if (seg.continuesNext) div.classList.add("seg-cont-out");
+  if (t.disabled) div.classList.add("task-disabled");
   div.style.top = top + "px";
   div.style.height = height + "px";
   div.style.left = `calc(${leftPct}% + 2px)`;
@@ -677,6 +826,7 @@ function renderSegment(col, seg) {
 
   div.innerHTML = `
     <button class="del" title="Удалить">✕</button>
+    <button class="toggle" title="${t.disabled ? "Включить" : "Отключить (не учитывать в расчётах)"}">${t.disabled ? "▶" : "⏸"}</button>
     <span class="txt">${escapeHtml(t.name)}</span>
     <span class="time">${timeLine}</span>
   `;
@@ -686,8 +836,14 @@ function renderSegment(col, seg) {
     saveTasks();
     buildGrid();
   });
+  div.querySelector(".toggle").addEventListener("click", (e) => {
+    e.stopPropagation();
+    t.disabled = !t.disabled;
+    saveTasks();
+    buildGrid();
+  });
   div.addEventListener("click", (e) => {
-    if (e.target.closest(".del")) return;
+    if (e.target.closest(".del") || e.target.closest(".toggle")) return;
     openModal(t.date, t.start, t.id);
   });
 
@@ -707,6 +863,7 @@ const durationFields = document.getElementById("durationFields");
 const endFields = document.getElementById("endFields");
 const modeDurationBtn = document.getElementById("modeDurationBtn");
 const modeEndBtn = document.getElementById("modeEndBtn");
+const taskDisabledInput = document.getElementById("taskDisabled");
 const deleteBtn = document.getElementById("deleteBtn");
 const modalTitle = document.getElementById("modalTitle");
 let pendingDate = null, editingId = null, durationMode = "duration";
@@ -775,6 +932,7 @@ function openModal(dateStr, startMinutes, taskId) {
     taskCategorySelect.value = t.category || (CATEGORIES[0] ? CATEGORIES[0].id : "");
     taskStartInput.value = minutesToTimeStr(t.start);
     setDurationFields(t.duration);
+    taskDisabledInput.checked = !!t.disabled;
     deleteBtn.style.display = "inline-block";
   } else {
     editingId = null;
@@ -783,6 +941,7 @@ function openModal(dateStr, startMinutes, taskId) {
     taskCategorySelect.value = CATEGORIES[0] ? CATEGORIES[0].id : "";
     taskStartInput.value = minutesToTimeStr(startMinutes);
     setDurationFields(60);
+    taskDisabledInput.checked = false;
     deleteBtn.style.display = "none";
   }
   syncEndFromDuration();
@@ -829,12 +988,13 @@ document.getElementById("saveBtn").addEventListener("click", () => {
   duration = Math.min(duration, 1440); // cap at 24h — a task can carry over at most one night
 
   const category = taskCategorySelect.value;
+  const disabled = taskDisabledInput.checked;
 
   if (editingId) {
     const t = tasks.find(x => x.id === editingId);
-    t.name = name; t.category = category; t.start = start; t.duration = duration;
+    t.name = name; t.category = category; t.start = start; t.duration = duration; t.disabled = disabled;
   } else {
-    tasks.push({ id: genId(), date: pendingDate, start, duration, name, category });
+    tasks.push({ id: genId(), date: pendingDate, start, duration, name, category, disabled });
   }
   saveTasks();
   buildGrid();
@@ -860,7 +1020,8 @@ function renderCatList() {
     row.innerHTML = `
       <input type="color" value="${c.color}">
       <input type="text" value="${escapeHtml(c.label)}">
-      <button class="del" title="Удалить">✕</button>
+      ${c.fixed ? `<span class="fixed-tag" title="Нельзя удалить — используется для расчёта заработка">фикс.</span>` : ""}
+      <button class="del" title="Удалить" ${c.fixed ? "disabled" : ""}>✕</button>
     `;
     const [colorInput, nameInput] = row.querySelectorAll("input");
     const delBtn = row.querySelector(".del");
@@ -877,6 +1038,10 @@ function renderCatList() {
       else nameInput.value = c.label;
     });
     delBtn.addEventListener("click", () => {
+      if (c.fixed) {
+        alert("Категорию «" + c.label + "» нельзя удалить — она используется для расчёта заработка.");
+        return;
+      }
       if (CATEGORIES.length <= 1) { alert("Должна остаться хотя бы одна категория."); return; }
       const fallback = CATEGORIES.find(x => x.id !== c.id);
       tasks.forEach(t => { if (t.category === c.id) t.category = fallback.id; });
@@ -889,6 +1054,19 @@ function renderCatList() {
     });
 
     catList.appendChild(row);
+
+    if (c.fixed) {
+      const rateRow = document.createElement("div");
+      rateRow.className = "cat-rate-row";
+      rateRow.innerHTML = `<label>Ставка, €/час</label><input type="number" min="0" step="0.5" value="${c.hourlyRate || 0}">`;
+      const rateInput = rateRow.querySelector("input");
+      rateInput.addEventListener("input", () => {
+        c.hourlyRate = parseFloat(rateInput.value) || 0;
+        saveCategories();
+        updateEarningsPanel();
+      });
+      catList.appendChild(rateRow);
+    }
   });
 }
 
@@ -932,6 +1110,61 @@ document.getElementById("todayBtn").addEventListener("click", () => {
   currentMonday = getMonday(new Date());
   refreshAll();
 });
+
+/* ---------- Updates (desktop only, via pywebview) ---------- */
+function isDesktop() {
+  return !!(window.pywebview && window.pywebview.api);
+}
+
+async function loadVersionBadge() {
+  const badge = document.getElementById("versionBadge");
+  if (!isDesktop()) { badge.textContent = ""; return; }
+  try {
+    const v = await window.pywebview.api.get_version();
+    badge.textContent = "v" + v;
+  } catch (e) { badge.textContent = ""; }
+}
+
+const updateBtn = document.getElementById("updateBtn");
+updateBtn.addEventListener("click", async () => {
+  if (!isDesktop()) {
+    alert("Проверка обновлений доступна только в десктопной версии приложения.");
+    return;
+  }
+  const originalLabel = updateBtn.textContent;
+  updateBtn.disabled = true;
+  updateBtn.textContent = "Проверка...";
+  try {
+    const res = await window.pywebview.api.check_for_update();
+    if (!res.ok) {
+      alert("Не удалось проверить обновления:\n" + res.error);
+      return;
+    }
+    if (!res.hasUpdate) {
+      alert("У вас последняя версия.");
+      return;
+    }
+    if (confirm("Доступно обновление. Установить и перезапустить приложение?")) {
+      updateBtn.textContent = "Обновление...";
+      // process restarts on success — no response will come back
+      window.pywebview.api.update_and_restart();
+    }
+  } catch (e) {
+    alert("Ошибка обновления: " + e);
+  } finally {
+    updateBtn.disabled = false;
+    updateBtn.textContent = originalLabel;
+  }
+});
+
+function initDesktopIntegration() {
+  loadVersionBadge();
+}
+if (window.pywebview) {
+  initDesktopIntegration();
+} else {
+  window.addEventListener("pywebviewready", initDesktopIntegration);
+}
 
 /* ---------- Init ---------- */
 buildSkeleton();
