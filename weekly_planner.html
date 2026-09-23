@@ -502,6 +502,14 @@
     <input type="text" id="taskName" placeholder="Например: тренировка">
     <label>Категория</label>
     <select id="taskCategory"></select>
+
+    <div id="workFields" style="display:none;">
+      <label>Подкатегория (например, место работы)</label>
+      <input type="text" id="taskSubcategory" placeholder="Например: Algorithmics">
+      <label>Ставка, €/час</label>
+      <input type="number" id="taskRate" min="0" step="0.5" placeholder="0">
+    </div>
+
     <label>Начало</label>
     <input type="time" id="taskStart" step="60">
 
@@ -648,7 +656,10 @@ function escapeHtml(str) {
 
 /* ---------- Tasks ---------- */
 // task: { id, date (ISO yyyy-mm-dd — the day it STARTS on), start (minutes 0-1439),
-//         duration (minutes, may push past midnight into the next date), name, category }
+//         duration (minutes, may push past midnight into the next date), name, category,
+//         subcategory (string, only meaningful when the category is isWork — e.g. which
+//         job/employer), rate (number, only meaningful when isWork — per-task hourly rate
+//         that overrides the category's own default rate when set) }
 const STORAGE_KEY = "weekly_planner_tasks_v4";
 function loadTasks() {
   try {
@@ -722,24 +733,33 @@ function workCategories() {
   return CATEGORIES.filter(c => c.isWork);
 }
 
-// Sums the actual duration of non-disabled tasks per category whose start
-// date falls in the currently displayed week (segments split across midnight
-// are just a visual split of the same task, so this uses task.duration directly).
-function weekMinutesByCategory() {
-  if (!weekDates.length) return {};
+// Groups the non-disabled tasks of the currently displayed week that fall
+// under a "work" category, by (category + subcategory) — e.g. "Работа ·
+// Algorithmics" vs "Работа · Отель". A task's own rate (set in the task
+// card) wins when present; otherwise it falls back to the category's
+// default rate. Segments split across midnight are just a visual split of
+// the same task, so this uses task.duration directly.
+function weekWorkBreakdown() {
+  if (!weekDates.length) return [];
   const weekDateStrs = new Set(weekDates.map(isoDate));
-  const map = {};
+  const groups = {};
   tasks.forEach(t => {
-    if (!t.disabled && weekDateStrs.has(t.date)) {
-      map[t.category] = (map[t.category] || 0) + t.duration;
+    if (t.disabled || !weekDateStrs.has(t.date)) return;
+    const cat = categoryById(t.category);
+    if (!cat.isWork) return;
+    const sub = (t.subcategory || "").trim();
+    const rate = (typeof t.rate === "number" && !isNaN(t.rate)) ? t.rate : (cat.hourlyRate || 0);
+    const key = cat.id + "||" + sub;
+    if (!groups[key]) {
+      groups[key] = { label: sub ? `${cat.label} · ${sub}` : cat.label, minutes: 0, rate };
     }
+    groups[key].minutes += t.duration;
   });
-  return map;
+  return Object.values(groups);
 }
 
 function updateEarningsPanel() {
-  const minutesByCat = weekMinutesByCategory();
-  const cats = workCategories();
+  const groups = weekWorkBreakdown();
 
   const fmtMoney = (n) => n.toLocaleString("ru-RU", { maximumFractionDigits: 2, minimumFractionDigits: 0 }) + " €";
   const fmtHours = (h) => {
@@ -748,14 +768,11 @@ function updateEarningsPanel() {
   };
 
   let weekEarnings = 0;
-  const lines = [];
-  cats.forEach(c => {
-    const minutes = minutesByCat[c.id] || 0;
-    const hours = minutes / 60;
-    const rate = c.hourlyRate || 0;
-    const earn = hours * rate;
+  const lines = groups.map(g => {
+    const hours = g.minutes / 60;
+    const earn = hours * g.rate;
     weekEarnings += earn;
-    lines.push({ label: c.label, hours, rate, earn });
+    return { label: g.label, hours, rate: g.rate, earn };
   });
   const monthEarnings = weekEarnings * 4;
 
@@ -909,7 +926,8 @@ function renderSegment(col, seg) {
 
   const startLabel = minutesToTimeStr(t.start);
   const endLabel = fullEndLabel(t);
-  div.title = `${t.name} (${startLabel}–${endLabel})`;
+  const subLabel = t.subcategory ? ` · ${t.subcategory}` : "";
+  div.title = `${t.name}${subLabel} (${startLabel}–${endLabel})`;
 
   const timeLine = seg.isHead
     ? `${startLabel}–${seg.continuesNext ? "…" : endLabel}`
@@ -945,6 +963,9 @@ function renderSegment(col, seg) {
 const overlay = document.getElementById("overlay");
 const taskNameInput = document.getElementById("taskName");
 const taskCategorySelect = document.getElementById("taskCategory");
+const workFields = document.getElementById("workFields");
+const taskSubcategoryInput = document.getElementById("taskSubcategory");
+const taskRateInput = document.getElementById("taskRate");
 const taskStartInput = document.getElementById("taskStart");
 const taskHoursInput = document.getElementById("taskHours");
 const taskMinutesInput = document.getElementById("taskMinutes");
@@ -958,6 +979,20 @@ const taskDisabledInput = document.getElementById("taskDisabled");
 const deleteBtn = document.getElementById("deleteBtn");
 const modalTitle = document.getElementById("modalTitle");
 let pendingDate = null, editingId = null, durationMode = "duration";
+
+// Shows the "Подкатегория" + "Ставка" fields only when the selected category
+// is a work category (isWork). The rate input's placeholder shows the
+// category's own default rate, so leaving the field empty just means "use
+// the category's rate" — only a value typed there overrides it per-task.
+function syncWorkFieldsVisibility() {
+  const cat = categoryById(taskCategorySelect.value);
+  const isWork = !!(cat && cat.isWork);
+  workFields.style.display = isWork ? "" : "none";
+  if (isWork) {
+    taskRateInput.placeholder = String(cat.hourlyRate || 0);
+  }
+}
+taskCategorySelect.addEventListener("change", syncWorkFieldsVisibility);
 
 function setDurationMode(mode) {
   durationMode = mode;
@@ -1024,6 +1059,8 @@ function openModal(dateStr, startMinutes, taskId) {
     taskStartInput.value = minutesToTimeStr(t.start);
     setDurationFields(t.duration);
     taskDisabledInput.checked = !!t.disabled;
+    taskSubcategoryInput.value = t.subcategory || "";
+    taskRateInput.value = (typeof t.rate === "number" && !isNaN(t.rate)) ? t.rate : "";
     deleteBtn.style.display = "inline-block";
   } else {
     editingId = null;
@@ -1033,8 +1070,11 @@ function openModal(dateStr, startMinutes, taskId) {
     taskStartInput.value = minutesToTimeStr(startMinutes);
     setDurationFields(60);
     taskDisabledInput.checked = false;
+    taskSubcategoryInput.value = "";
+    taskRateInput.value = "";
     deleteBtn.style.display = "none";
   }
+  syncWorkFieldsVisibility();
   syncEndFromDuration();
 
   overlay.classList.add("open");
@@ -1081,11 +1121,23 @@ document.getElementById("saveBtn").addEventListener("click", () => {
   const category = taskCategorySelect.value;
   const disabled = taskDisabledInput.checked;
 
+  const cat = categoryById(category);
+  let subcategory, rate;
+  if (cat && cat.isWork) {
+    subcategory = taskSubcategoryInput.value.trim();
+    const rateVal = parseFloat(taskRateInput.value);
+    rate = (taskRateInput.value !== "" && !isNaN(rateVal)) ? rateVal : undefined;
+  } else {
+    subcategory = undefined;
+    rate = undefined;
+  }
+
   if (editingId) {
     const t = tasks.find(x => x.id === editingId);
     t.name = name; t.category = category; t.start = start; t.duration = duration; t.disabled = disabled;
+    t.subcategory = subcategory; t.rate = rate;
   } else {
-    tasks.push({ id: genId(), date: pendingDate, start, duration, name, category, disabled });
+    tasks.push({ id: genId(), date: pendingDate, start, duration, name, category, disabled, subcategory, rate });
   }
   saveTasks();
   buildGrid();
