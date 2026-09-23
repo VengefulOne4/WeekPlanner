@@ -220,8 +220,63 @@ class Api:
         _save_json(PROFILES_INDEX_PATH, index)
         return {"ok": True}
 
+    def _find_project_root(self):
+        """The git repo's top-level folder — computed via git itself, so it
+        works regardless of how deep BASE_DIR is nested (e.g. dist/desktop_app/
+        for a frozen build)."""
+        res = self._run(["git", "rev-parse", "--show-toplevel"])
+        if res.returncode != 0:
+            return None
+        # git always returns forward slashes; normalize for the current OS
+        return os.path.normpath(res.stdout.strip())
+
+    def _rebuild_exe(self):
+        """Re-runs PyInstaller from the freshly-pulled source so the bundled
+        HTML/Python inside the .exe actually reflects the update — a plain
+        relaunch of a frozen build would just re-run the OLD baked-in code,
+        since PyInstaller bakes files in at build time and `git pull` only
+        touches the source folder, never the compiled bundle."""
+        project_root = self._find_project_root()
+        if not project_root:
+            return {"ok": False, "error": "Не удалось определить корень git-репозитория для пересборки."}
+
+        add_data_html = f"weekly_planner.html{os.pathsep}."
+        add_data_version = f"version.json{os.pathsep}."
+        candidates = [
+            ["pyinstaller", "--onedir", "--noconfirm",
+             "--add-data", add_data_html, "--add-data", add_data_version, "desktop_app.py"],
+            ["python", "-m", "PyInstaller", "--onedir", "--noconfirm",
+             "--add-data", add_data_html, "--add-data", add_data_version, "desktop_app.py"],
+            ["py", "-m", "PyInstaller", "--onedir", "--noconfirm",
+             "--add-data", add_data_html, "--add-data", add_data_version, "desktop_app.py"],
+        ]
+
+        last_error = "PyInstaller не найден (ни pyinstaller, ни python -m PyInstaller, ни py -m PyInstaller)."
+        for cmd in candidates:
+            try:
+                result = subprocess.run(
+                    cmd, cwd=project_root, capture_output=True, text=True, timeout=240,
+                )
+            except FileNotFoundError:
+                continue
+            except subprocess.TimeoutExpired:
+                return {"ok": False, "error": "Превышено время ожидания пересборки (PyInstaller)."}
+
+            if result.returncode == 0:
+                exe_name = "desktop_app.exe" if sys.platform.startswith("win") else "desktop_app"
+                exe_path = os.path.join(project_root, "dist", "desktop_app", exe_name)
+                if os.path.exists(exe_path):
+                    return {"ok": True, "exe_path": exe_path}
+                last_error = "Пересборка завершилась без ошибок, но новый .exe не найден по ожидаемому пути."
+            else:
+                last_error = ((result.stderr or result.stdout or "").strip())[-2000:] or "PyInstaller вернул ошибку."
+            break  # this candidate command WAS found and ran — don't silently try alternates on a real failure
+
+        return {"ok": False, "error": "Не удалось пересобрать .exe: " + last_error}
+
     def update_and_restart(self):
-        """Pulls latest changes and relaunches the whole process."""
+        """Pulls latest changes, rebuilds the .exe if running as one (so the
+        update actually takes effect), and relaunches."""
         try:
             pull = self._run(["git", "pull", "--ff-only"], timeout=40)
             if pull.returncode != 0:
@@ -229,8 +284,15 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-        # Relaunch the whole process so both the HTML/JS and any Python
-        # changes brought in by the update take effect.
+        if getattr(sys, "frozen", False):
+            rebuild = self._rebuild_exe()
+            if not rebuild["ok"]:
+                return rebuild
+            new_exe = rebuild["exe_path"]
+            os.execv(new_exe, [new_exe])
+            return {"ok": True}  # unreachable, kept for clarity
+
+        # Not frozen: just relaunch the interpreter on the (now updated) script.
         python = sys.executable
         os.execv(python, [python] + sys.argv)
         return {"ok": True}  # unreachable, kept for clarity

@@ -1401,9 +1401,19 @@ updateBtn.addEventListener("click", async () => {
       return;
     }
     if (confirm("Доступно обновление. Установить и перезапустить приложение?")) {
-      updateBtn.textContent = "Обновление...";
-      // process restarts on success — no response will come back
-      window.pywebview.api.update_and_restart();
+      // For a plain `python desktop_app.py` run this pulls and relaunches almost
+      // instantly. For a packaged .exe it also rebuilds it from the updated
+      // source first (PyInstaller), which can genuinely take a couple of
+      // minutes — the window will just close and reopen once that's done, or
+      // this call returns with an error if something went wrong along the way.
+      updateBtn.textContent = "Обновление (может занять до пары минут)...";
+      // On success the whole process relaunches (or rebuilds+relaunches for a
+      // packaged .exe) before this ever resolves, so nothing below runs. If we
+      // DO get a response, it means it failed and didn't restart.
+      const res2 = await window.pywebview.api.update_and_restart();
+      if (res2 && res2.ok === false) {
+        alert("Не удалось обновить приложение:\n" + res2.error);
+      }
     }
   } catch (e) {
     alert("Ошибка обновления: " + (e && e.message ? e.message : e));
