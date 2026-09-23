@@ -19,6 +19,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import uuid
@@ -58,11 +59,65 @@ RESOURCE_DIR = get_resource_dir()  # where the bundled html/version.json actuall
 HTML_PATH = os.path.join(RESOURCE_DIR, "weekly_planner.html")
 VERSION_PATH = os.path.join(RESOURCE_DIR, "version.json")
 
-# Local, per-machine state (tasks/categories per profile). Lives next to the app,
-# NOT tracked by git (see .gitignore) — a `git pull` must never touch this data.
-PROFILES_DIR = os.path.join(BASE_DIR, "profiles")
+
+def _detect_git_project_root(base_dir):
+    """Best-effort git-toplevel lookup, usable at module load time (before
+    the Api class — and its subprocess helper — exist)."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=base_dir, capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            return os.path.normpath(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
+def get_data_dir():
+    """Stable folder for the user's own local data (profiles/) — must NOT be
+    the same folder PyInstaller rebuilds into.
+
+    For a frozen .exe, BASE_DIR is dist/desktop_app/ — exactly the folder
+    that gets wiped clean on every rebuild (both the old in-process rebuild
+    and the current updater.py both do this; it's simply how PyInstaller
+    always builds --onedir output). If profiles/ lived inside BASE_DIR, an
+    update would silently delete the user's saved schedules along with the
+    old .exe. So for a frozen build we instead resolve the stable git
+    project root and keep profiles/ there, untouched by any rebuild — and
+    only fall back to BASE_DIR if that can't be determined (e.g. this isn't
+    a git repo at all, in which case auto-rebuild can't run either way, so
+    there's nothing at risk from keeping the old behavior)."""
+    if getattr(sys, "frozen", False):
+        root = _detect_git_project_root(BASE_DIR)
+        if root:
+            return root
+    return BASE_DIR
+
+
+DATA_DIR = get_data_dir()
+PROFILES_DIR = os.path.join(DATA_DIR, "profiles")
 PROFILES_INDEX_PATH = os.path.join(PROFILES_DIR, "index.json")
 DEFAULT_PROFILE_ID = "default"
+
+
+def _migrate_profiles_out_of_build_dir():
+    """One-time move for anyone who already has profiles/ sitting inside the
+    old, unsafe location (BASE_DIR — the rebuilt-on-every-update folder).
+    Runs once at startup; harmless no-op afterwards."""
+    if DATA_DIR == BASE_DIR:
+        return
+    old_dir = os.path.join(BASE_DIR, "profiles")
+    if os.path.isdir(old_dir) and not os.path.isdir(PROFILES_DIR):
+        try:
+            os.makedirs(os.path.dirname(PROFILES_DIR), exist_ok=True)
+            shutil.move(old_dir, PROFILES_DIR)
+        except Exception:
+            pass  # best-effort — worst case the user keeps their old profiles/ in place
+
+
+_migrate_profiles_out_of_build_dir()
 
 
 def _ensure_profiles_dir():
@@ -363,6 +418,7 @@ def main():
         pass
     print(f"BASE_DIR (git): {BASE_DIR}")
     print(f"RESOURCE_DIR (html/version): {RESOURCE_DIR}")
+    print(f"PROFILES_DIR (ваши задачи/категории): {PROFILES_DIR}")
 
     api = Api()
     webview.create_window(

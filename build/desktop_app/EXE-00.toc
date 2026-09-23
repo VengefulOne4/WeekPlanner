@@ -78,7 +78,7 @@
  [],
  False,
  False,
- 1790160828,
+ 1790161626,
  [('run.exe',
    'C:\\Users\\vanko\\AppData\\Roaming\\Python\\Python311\\site-packages\\PyInstaller\\bootloader\\Windows-64bit-intel\\run.exe',
    'EXECUTABLE')],

@@ -21,6 +21,7 @@ desktop_app.exe закрывается для обновления: пока .ex
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -75,10 +76,26 @@ def wait_for_exit(pid, timeout=30):
 def rebuild(project_root):
     """Runs PyInstaller from project_root into the single dist/ folder —
     safe now, since the old .exe (if any) is confirmed gone by this point."""
-    add_data_html = f"weekly_planner.html{os.pathsep}."
-    add_data_version = f"version.json{os.pathsep}."
     distpath = os.path.join(project_root, "dist")
     workpath = os.path.join(project_root, "build")
+
+    # Safety net for anyone updating from an OLD build that (due to a since-fixed
+    # bug) kept its profiles/ data inside dist/desktop_app/ itself — exactly the
+    # folder PyInstaller is about to wipe clean before rebuilding. If we find one
+    # there, rescue it into the project root first, where the new build will look
+    # for it (current desktop_app.py keeps profiles/ next to the source, not
+    # inside the rebuilt folder, specifically so this can't happen going forward).
+    old_profiles = os.path.join(distpath, "desktop_app", "profiles")
+    safe_profiles = os.path.join(project_root, "profiles")
+    if os.path.isdir(old_profiles) and not os.path.isdir(safe_profiles):
+        try:
+            shutil.move(old_profiles, safe_profiles)
+            log(project_root, f"Профили перенесены из старого места сборки в {safe_profiles} (безопасно от пересборки).")
+        except Exception as e:
+            log(project_root, f"Не удалось перенести старые профили автоматически: {e}")
+
+    add_data_html = f"weekly_planner.html{os.pathsep}."
+    add_data_version = f"version.json{os.pathsep}."
     common_args = [
         "--onedir", "--noconfirm",
         "--distpath", distpath, "--workpath", workpath,
