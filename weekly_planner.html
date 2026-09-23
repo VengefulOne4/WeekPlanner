@@ -398,14 +398,6 @@
     border-radius: 6px;
     font-size: 12px;
   }
-  .fixed-tag {
-    font-size: 10px;
-    color: var(--muted);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 1px 5px;
-    flex-shrink: 0;
-  }
   .active-tag {
     font-size: 10px;
     color: #fff;
@@ -589,10 +581,12 @@ let activeProfileName = "";
 let profilesCache = [];
 
 /* ---------- Categories ---------- */
-const CATEGORIES_KEY = "weekly_planner_categories_v1";
-const WORK_CATEGORY_ID = "work";
+// Any category can be marked isWork — that's what lets you have several
+// "work" categories (e.g. different jobs) each with its own hourly rate,
+// instead of one fixed "Работа" category with a single rate.
+const CATEGORIES_KEY = "weekly_planner_categories_v2";
 const DEFAULT_CATEGORIES = [
-  { id: "work",   label: "Работа",  color: "#5b8cff", fixed: true, hourlyRate: 0 },
+  { id: "work",   label: "Работа",  color: "#5b8cff", isWork: true, hourlyRate: 0 },
   { id: "study",  label: "Учёба",   color: "#9b6bff" },
   { id: "sleep",  label: "Сон",     color: "#4a5568" },
   { id: "sport",  label: "Спорт",   color: "#ff8a5c" },
@@ -600,22 +594,23 @@ const DEFAULT_CATEGORIES = [
   { id: "personal", label: "Личное", color: "#ffd15c" },
   { id: "other",  label: "Другое",  color: "#8b909c" },
 ];
-function ensureWorkCategory(list) {
-  const work = list.find(c => c.id === WORK_CATEGORY_ID);
-  if (work) {
-    work.fixed = true;
-    if (typeof work.hourlyRate !== "number" || isNaN(work.hourlyRate)) work.hourlyRate = 0;
-  } else {
-    list.unshift({ id: WORK_CATEGORY_ID, label: "Работа", color: "#5b8cff", fixed: true, hourlyRate: 0 });
+// At least one category must be marked isWork, otherwise there's nothing to
+// calculate earnings from. If somehow none are, the first category becomes one.
+function ensureAtLeastOneWorkCategory(list) {
+  if (!list.some(c => c.isWork)) {
+    list[0].isWork = true;
   }
+  list.forEach(c => {
+    if (c.isWork && (typeof c.hourlyRate !== "number" || isNaN(c.hourlyRate))) c.hourlyRate = 0;
+  });
   return list;
 }
 function loadCategories() {
   try {
     const stored = JSON.parse(localStorage.getItem(CATEGORIES_KEY));
-    if (Array.isArray(stored) && stored.length) return ensureWorkCategory(stored);
+    if (Array.isArray(stored) && stored.length) return ensureAtLeastOneWorkCategory(stored);
   } catch (e) {}
-  return ensureWorkCategory(DEFAULT_CATEGORIES.map(c => ({ ...c })));
+  return ensureAtLeastOneWorkCategory(DEFAULT_CATEGORIES.map(c => ({ ...c })));
 }
 function saveCategories() { persistAll(); }
 let CATEGORIES = loadCategories();
@@ -636,9 +631,10 @@ function makeCategoryId(label) {
   return id;
 }
 function buildLegend() {
-  document.getElementById("legend").innerHTML = CATEGORIES.map(c =>
-    `<div class="legend-item"><span class="legend-swatch" style="background:${c.color}"></span>${escapeHtml(c.label)}</div>`
-  ).join("");
+  document.getElementById("legend").innerHTML = CATEGORIES.map(c => {
+    const rateSuffix = c.isWork ? ` <span style="opacity:0.7;">(${c.hourlyRate || 0} €/ч)</span>` : "";
+    return `<div class="legend-item"><span class="legend-swatch" style="background:${c.color}"></span>${escapeHtml(c.label)}${rateSuffix}</div>`;
+  }).join("");
 }
 function buildCategorySelect() {
   const sel = document.getElementById("taskCategory");
@@ -722,37 +718,60 @@ function segmentsForColumn(d) {
   return segs;
 }
 
-function workCategory() {
-  return CATEGORIES.find(c => c.id === WORK_CATEGORY_ID) || { hourlyRate: 0 };
+function workCategories() {
+  return CATEGORIES.filter(c => c.isWork);
 }
 
-// Sums the actual duration of non-disabled "Работа" tasks whose start date
-// falls in the currently displayed week (segments split across midnight are
-// just a visual split of the same task, so this uses task.duration directly).
-function weekWorkMinutes() {
-  if (!weekDates.length) return 0;
+// Sums the actual duration of non-disabled tasks per category whose start
+// date falls in the currently displayed week (segments split across midnight
+// are just a visual split of the same task, so this uses task.duration directly).
+function weekMinutesByCategory() {
+  if (!weekDates.length) return {};
   const weekDateStrs = new Set(weekDates.map(isoDate));
-  return tasks
-    .filter(t => t.category === WORK_CATEGORY_ID && !t.disabled && weekDateStrs.has(t.date))
-    .reduce((sum, t) => sum + t.duration, 0);
+  const map = {};
+  tasks.forEach(t => {
+    if (!t.disabled && weekDateStrs.has(t.date)) {
+      map[t.category] = (map[t.category] || 0) + t.duration;
+    }
+  });
+  return map;
 }
 
 function updateEarningsPanel() {
-  const rate = workCategory().hourlyRate || 0;
-  const minutes = weekWorkMinutes();
-  const hours = minutes / 60;
-  const weekEarnings = hours * rate;
-  const monthEarnings = weekEarnings * 4;
+  const minutesByCat = weekMinutesByCategory();
+  const cats = workCategories();
 
   const fmtMoney = (n) => n.toLocaleString("ru-RU", { maximumFractionDigits: 2, minimumFractionDigits: 0 }) + " €";
   const fmtHours = (h) => {
     const wh = Math.floor(h), wm = Math.round((h - wh) * 60);
-    return `${wh} ч ${wm} мин работы, ${rate} €/ч`;
+    return `${wh} ч ${wm} мин`;
   };
 
+  let weekEarnings = 0;
+  const lines = [];
+  cats.forEach(c => {
+    const minutes = minutesByCat[c.id] || 0;
+    const hours = minutes / 60;
+    const rate = c.hourlyRate || 0;
+    const earn = hours * rate;
+    weekEarnings += earn;
+    lines.push({ label: c.label, hours, rate, earn });
+  });
+  const monthEarnings = weekEarnings * 4;
+
   document.getElementById("weekEarningsValue").textContent = fmtMoney(weekEarnings);
-  document.getElementById("weekEarningsHours").textContent = fmtHours(hours);
   document.getElementById("monthEarningsValue").textContent = fmtMoney(monthEarnings);
+
+  const breakdownEl = document.getElementById("weekEarningsHours");
+  if (lines.length > 1) {
+    breakdownEl.innerHTML = lines
+      .map(l => `<div>${escapeHtml(l.label)}: ${fmtHours(l.hours)} × ${l.rate} €/ч = ${fmtMoney(l.earn)}</div>`)
+      .join("");
+  } else if (lines.length === 1) {
+    breakdownEl.textContent = `${fmtHours(lines[0].hours)} работы, ${lines[0].rate} €/ч`;
+  } else {
+    breakdownEl.textContent = "";
+  }
 }
 
 function pad2(n) { return String(n).padStart(2, "0"); }
@@ -1087,15 +1106,21 @@ const newCatColor = document.getElementById("newCatColor");
 function renderCatList() {
   catList.innerHTML = "";
   CATEGORIES.forEach(c => {
+    const workCount = CATEGORIES.filter(x => x.isWork).length;
+    const isLastWork = c.isWork && workCount <= 1;
+
     const row = document.createElement("div");
     row.className = "cat-row";
     row.innerHTML = `
       <input type="color" value="${c.color}">
       <input type="text" value="${escapeHtml(c.label)}">
-      ${c.fixed ? `<span class="fixed-tag" title="Нельзя удалить — используется для расчёта заработка">фикс.</span>` : ""}
-      <button class="del" title="Удалить" ${c.fixed ? "disabled" : ""}>✕</button>
+      <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--muted);white-space:nowrap;cursor:pointer;">
+        <input type="checkbox" style="width:auto;" ${c.isWork ? "checked" : ""}> работа
+      </label>
+      <button class="del" title="${isLastWork ? "Нельзя удалить единственную рабочую категорию" : "Удалить"}" ${CATEGORIES.length <= 1 || isLastWork ? "disabled" : ""}>✕</button>
     `;
-    const [colorInput, nameInput] = row.querySelectorAll("input");
+    const [colorInput, nameInput] = row.querySelectorAll('input[type="color"], input[type="text"]');
+    const workCheckbox = row.querySelector('input[type="checkbox"]');
     const delBtn = row.querySelector(".del");
 
     colorInput.addEventListener("input", () => {
@@ -1106,15 +1131,31 @@ function renderCatList() {
     });
     nameInput.addEventListener("change", () => {
       const val = nameInput.value.trim();
-      if (val) { c.label = val; saveCategories(); buildLegend(); }
+      if (val) { c.label = val; saveCategories(); buildLegend(); updateEarningsPanel(); }
       else nameInput.value = c.label;
     });
+    workCheckbox.addEventListener("change", () => {
+      if (!workCheckbox.checked) {
+        const currentWorkCount = CATEGORIES.filter(x => x.isWork).length;
+        if (currentWorkCount <= 1) {
+          alert("Должна остаться хотя бы одна рабочая категория — иначе не от чего считать заработок.");
+          workCheckbox.checked = true;
+          return;
+        }
+      } else if (typeof c.hourlyRate !== "number" || isNaN(c.hourlyRate)) {
+        c.hourlyRate = 0;
+      }
+      c.isWork = workCheckbox.checked;
+      saveCategories();
+      renderCatList();
+      updateEarningsPanel();
+    });
     delBtn.addEventListener("click", () => {
-      if (c.fixed) {
-        alert("Категорию «" + c.label + "» нельзя удалить — она используется для расчёта заработка.");
+      if (CATEGORIES.length <= 1) { alert("Должна остаться хотя бы одна категория."); return; }
+      if (c.isWork && CATEGORIES.filter(x => x.isWork).length <= 1) {
+        alert("Нельзя удалить последнюю рабочую категорию — она нужна для расчёта заработка.");
         return;
       }
-      if (CATEGORIES.length <= 1) { alert("Должна остаться хотя бы одна категория."); return; }
       const fallback = CATEGORIES.find(x => x.id !== c.id);
       tasks.forEach(t => { if (t.category === c.id) t.category = fallback.id; });
       CATEGORIES = CATEGORIES.filter(x => x.id !== c.id);
@@ -1127,7 +1168,7 @@ function renderCatList() {
 
     catList.appendChild(row);
 
-    if (c.fixed) {
+    if (c.isWork) {
       const rateRow = document.createElement("div");
       rateRow.className = "cat-rate-row";
       rateRow.innerHTML = `<label>Ставка, €/час</label><input type="number" min="0" step="0.5" value="${c.hourlyRate || 0}">`;
@@ -1240,7 +1281,7 @@ function applyProfileData(data) {
   const cats = Array.isArray(data.categories) && data.categories.length
     ? data.categories
     : DEFAULT_CATEGORIES.map(c => ({ ...c }));
-  CATEGORIES = ensureWorkCategory(cats);
+  CATEGORIES = ensureAtLeastOneWorkCategory(cats);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
   localStorage.setItem(CATEGORIES_KEY, JSON.stringify(CATEGORIES));
   buildLegend();
