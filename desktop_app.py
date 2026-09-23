@@ -165,14 +165,16 @@ class Api:
 
         stale_build = False
         source_version = None
+        baked_version = None
+        project_root = None
         if getattr(sys, "frozen", False):
             project_root = self._find_project_root()
+            baked_version_data = _load_json(VERSION_PATH, None)
+            baked_version = (baked_version_data or {}).get("version")
             if project_root:
                 source_version_data = _load_json(
                     os.path.join(project_root, "version.json"), None)
-                baked_version_data = _load_json(VERSION_PATH, None)
                 source_version = (source_version_data or {}).get("version")
-                baked_version = (baked_version_data or {}).get("version")
                 if source_version and baked_version and source_version != baked_version:
                     stale_build = True
 
@@ -188,6 +190,9 @@ class Api:
             "ok": True,
             "hasUpdate": git_behind or stale_build,
             "gitBehind": git_behind,
+            "sourceVersion": source_version,
+            "bakedVersion": baked_version,
+            "projectRoot": project_root,
             "staleBuild": stale_build,
         }
 

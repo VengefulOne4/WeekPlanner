@@ -1490,7 +1490,14 @@ updateBtn.addEventListener("click", async () => {
       return;
     }
     if (!res.hasUpdate) {
-      alert("У вас последняя версия.");
+      // When running as a frozen .exe, show exactly which versions were compared —
+      // makes it obvious whether version.json in the source actually differs from
+      // what's baked into this build, instead of just trusting "up to date".
+      let details = "";
+      if (res.sourceVersion !== undefined && res.sourceVersion !== null) {
+        details = `\n\nИсходники (${res.projectRoot || "?"}): ${res.sourceVersion}\nТекущая сборка: ${res.bakedVersion}`;
+      }
+      alert("У вас последняя версия." + details);
       return;
     }
     let reason;
