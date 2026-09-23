@@ -129,29 +129,67 @@ class Api:
         )
 
     def check_for_update(self):
-        """Fetches from origin and reports whether the local branch is behind."""
+        """Reports whether an update is available, for two different reasons:
+
+        1) "git_behind" — origin on GitHub has commits this local repo doesn't
+           (the classic "another machine/copy pushed something new" case).
+        2) "stale_build" — when running as a frozen .exe: the version.json at
+           the project's source root no longer matches the version that was
+           baked into THIS .exe at build time. This catches the case where
+           you (or I) just edited files locally and bumped version.json —
+           nothing has necessarily been pushed anywhere, but the running .exe
+           is still serving the old, already-compiled code and should be
+           rebuilt. On a single machine this is usually the one that fires,
+           since local == origin the moment you push it yourself.
+        """
+        git_behind = False
+        git_error = None
         try:
             fetch = self._run(["git", "fetch"])
             if fetch.returncode != 0:
-                return {"ok": False, "error": fetch.stderr.strip() or "git fetch failed"}
-
-            local = self._run(["git", "rev-parse", "HEAD"])
-            remote = self._run(["git", "rev-parse", "@{u}"])
-            if local.returncode != 0 or remote.returncode != 0:
-                msg = (remote.stderr or local.stderr or "").strip()
-                return {
-                    "ok": False,
-                    "error": msg or "Не настроен upstream. Выполните: git push -u origin main",
-                }
-
-            has_update = local.stdout.strip() != remote.stdout.strip()
-            return {"ok": True, "hasUpdate": has_update}
+                git_error = fetch.stderr.strip() or "git fetch failed"
+            else:
+                local = self._run(["git", "rev-parse", "HEAD"])
+                remote = self._run(["git", "rev-parse", "@{u}"])
+                if local.returncode != 0 or remote.returncode != 0:
+                    git_error = (remote.stderr or local.stderr or "").strip() or \
+                        "Не настроен upstream. Выполните: git push -u origin main"
+                else:
+                    git_behind = local.stdout.strip() != remote.stdout.strip()
         except FileNotFoundError:
-            return {"ok": False, "error": "Git не установлен или не найден в PATH."}
+            git_error = "Git не установлен или не найден в PATH."
         except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "Превышено время ожидания git fetch."}
+            git_error = "Превышено время ожидания git fetch."
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            git_error = str(e)
+
+        stale_build = False
+        source_version = None
+        if getattr(sys, "frozen", False):
+            project_root = self._find_project_root()
+            if project_root:
+                source_version_data = _load_json(
+                    os.path.join(project_root, "version.json"), None)
+                baked_version_data = _load_json(VERSION_PATH, None)
+                source_version = (source_version_data or {}).get("version")
+                baked_version = (baked_version_data or {}).get("version")
+                if source_version and baked_version and source_version != baked_version:
+                    stale_build = True
+
+        # If git itself failed AND we have no other way to detect an update,
+        # surface the git error as before. But a stale local build is still
+        # worth reporting even when git fetch failed (e.g. offline) — in that
+        # case rebuilding still works, it just won't also `git pull` first
+        # (update_and_restart's pull is a safe no-op / harmless failure then).
+        if git_error and not stale_build:
+            return {"ok": False, "error": git_error}
+
+        return {
+            "ok": True,
+            "hasUpdate": git_behind or stale_build,
+            "gitBehind": git_behind,
+            "staleBuild": stale_build,
+        }
 
     # ---------- Profiles (local state) ----------
 
@@ -275,24 +313,41 @@ class Api:
         return {"ok": False, "error": "Не удалось пересобрать .exe: " + last_error}
 
     def update_and_restart(self):
-        """Pulls latest changes, rebuilds the .exe if running as one (so the
-        update actually takes effect), and relaunches."""
+        """Pulls latest changes (if any), rebuilds the .exe if running as one
+        (so the update actually takes effect), and relaunches.
+
+        A `git pull` failure here (e.g. no network, or nothing to pull from
+        because the "update" is really just a locally-edited, not-yet-pushed
+        stale build) is not fatal on its own — we still try to rebuild from
+        whatever source is on disk right now, since that's what the user
+        actually asked for. We only give up if BOTH pulling and rebuilding
+        are impossible."""
+        pull_error = None
         try:
             pull = self._run(["git", "pull", "--ff-only"], timeout=40)
             if pull.returncode != 0:
-                return {"ok": False, "error": pull.stderr.strip() or pull.stdout.strip()}
+                pull_error = pull.stderr.strip() or pull.stdout.strip()
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            pull_error = str(e)
 
         if getattr(sys, "frozen", False):
             rebuild = self._rebuild_exe()
             if not rebuild["ok"]:
+                # Rebuild is the only thing that matters for a frozen build —
+                # if it worked, a failed/no-op pull above doesn't matter.
+                if pull_error:
+                    rebuild["error"] = rebuild["error"] + f" (также не удалось выполнить git pull: {pull_error})"
                 return rebuild
             new_exe = rebuild["exe_path"]
             os.execv(new_exe, [new_exe])
             return {"ok": True}  # unreachable, kept for clarity
 
-        # Not frozen: just relaunch the interpreter on the (now updated) script.
+        # Not frozen: there's nothing to "rebuild" — the script IS the source,
+        # so if git pull didn't succeed, relaunching would just rerun the
+        # exact same code and silently look like nothing happened.
+        if pull_error:
+            return {"ok": False, "error": pull_error}
+
         python = sys.executable
         os.execv(python, [python] + sys.argv)
         return {"ok": True}  # unreachable, kept for clarity

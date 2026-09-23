@@ -1441,7 +1441,17 @@ updateBtn.addEventListener("click", async () => {
       alert("У вас последняя версия.");
       return;
     }
-    if (confirm("Доступно обновление. Установить и перезапустить приложение?")) {
+    let reason;
+    if (res.gitBehind && res.staleBuild) {
+      reason = "На GitHub есть новые коммиты, и к тому же исходники локально новее, чем текущая сборка .exe.";
+    } else if (res.gitBehind) {
+      reason = "На GitHub появились новые коммиты.";
+    } else if (res.staleBuild) {
+      reason = "version.json в исходниках отличается от версии, запечённой в текущем .exe (похоже, вы локально отредактировали файлы после последней сборки).";
+    } else {
+      reason = "Доступно обновление.";
+    }
+    if (confirm(reason + " Установить и перезапустить приложение?")) {
       // For a plain `python desktop_app.py` run this pulls and relaunches almost
       // instantly. For a packaged .exe it also rebuilds it from the updated
       // source first (PyInstaller), which can genuinely take a couple of
