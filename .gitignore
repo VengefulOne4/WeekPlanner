@@ -2,5 +2,8 @@ __pycache__/
 *.pyc
 dist/
 build/
+build_a/
+build_b/
 *.spec
 profiles/
+updater.log

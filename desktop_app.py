@@ -175,7 +175,12 @@ class Api:
                 source_version_data = _load_json(
                     os.path.join(project_root, "version.json"), None)
                 source_version = (source_version_data or {}).get("version")
-                if source_version and baked_version and source_version != baked_version:
+                # A missing/unreadable baked version.json (baked_version is None)
+                # counts as stale too, not "nothing to compare" — it usually means
+                # this particular .exe was built without version.json bundled
+                # (e.g. from an older build command, or a dist/ folder that
+                # predates this check), so it can't possibly be up to date.
+                if source_version and source_version != baked_version:
                     stale_build = True
 
         # If git itself failed AND we have no other way to detect an update,
@@ -273,88 +278,76 @@ class Api:
         # git always returns forward slashes; normalize for the current OS
         return os.path.normpath(res.stdout.strip())
 
-    def _rebuild_exe(self):
-        """Re-runs PyInstaller from the freshly-pulled source so the bundled
-        HTML/Python inside the .exe actually reflects the update — a plain
-        relaunch of a frozen build would just re-run the OLD baked-in code,
-        since PyInstaller bakes files in at build time and `git pull` only
-        touches the source folder, never the compiled bundle."""
-        project_root = self._find_project_root()
-        if not project_root:
-            return {"ok": False, "error": "Не удалось определить корень git-репозитория для пересборки."}
-
-        add_data_html = f"weekly_planner.html{os.pathsep}."
-        add_data_version = f"version.json{os.pathsep}."
-        candidates = [
-            ["pyinstaller", "--onedir", "--noconfirm",
-             "--add-data", add_data_html, "--add-data", add_data_version, "desktop_app.py"],
-            ["python", "-m", "PyInstaller", "--onedir", "--noconfirm",
-             "--add-data", add_data_html, "--add-data", add_data_version, "desktop_app.py"],
-            ["py", "-m", "PyInstaller", "--onedir", "--noconfirm",
-             "--add-data", add_data_html, "--add-data", add_data_version, "desktop_app.py"],
-        ]
-
-        last_error = "PyInstaller не найден (ни pyinstaller, ни python -m PyInstaller, ни py -m PyInstaller)."
-        for cmd in candidates:
-            try:
-                result = subprocess.run(
-                    cmd, cwd=project_root, capture_output=True, text=True, timeout=240,
-                )
-            except FileNotFoundError:
-                continue
-            except subprocess.TimeoutExpired:
-                return {"ok": False, "error": "Превышено время ожидания пересборки (PyInstaller)."}
-
-            if result.returncode == 0:
-                exe_name = "desktop_app.exe" if sys.platform.startswith("win") else "desktop_app"
-                exe_path = os.path.join(project_root, "dist", "desktop_app", exe_name)
-                if os.path.exists(exe_path):
-                    return {"ok": True, "exe_path": exe_path}
-                last_error = "Пересборка завершилась без ошибок, но новый .exe не найден по ожидаемому пути."
-            else:
-                last_error = ((result.stderr or result.stdout or "").strip())[-2000:] or "PyInstaller вернул ошибку."
-            break  # this candidate command WAS found and ran — don't silently try alternates on a real failure
-
-        return {"ok": False, "error": "Не удалось пересобрать .exe: " + last_error}
-
     def update_and_restart(self):
-        """Pulls latest changes (if any), rebuilds the .exe if running as one
-        (so the update actually takes effect), and relaunches.
+        """Applies the update and relaunches.
 
-        A `git pull` failure here (e.g. no network, or nothing to pull from
-        because the "update" is really just a locally-edited, not-yet-pushed
-        stale build) is not fatal on its own — we still try to rebuild from
-        whatever source is on disk right now, since that's what the user
-        actually asked for. We only give up if BOTH pulling and rebuilding
-        are impossible."""
-        pull_error = None
-        try:
-            pull = self._run(["git", "pull", "--ff-only"], timeout=40)
-            if pull.returncode != 0:
-                pull_error = pull.stderr.strip() or pull.stdout.strip()
-        except Exception as e:
-            pull_error = str(e)
+        Not frozen (`python desktop_app.py`): the script IS the source, so a
+        plain `git pull` + relaunching the interpreter is enough — nothing
+        needs rebuilding.
 
-        if getattr(sys, "frozen", False):
-            rebuild = self._rebuild_exe()
-            if not rebuild["ok"]:
-                # Rebuild is the only thing that matters for a frozen build —
-                # if it worked, a failed/no-op pull above doesn't matter.
-                if pull_error:
-                    rebuild["error"] = rebuild["error"] + f" (также не удалось выполнить git pull: {pull_error})"
-                return rebuild
-            new_exe = rebuild["exe_path"]
-            os.execv(new_exe, [new_exe])
+        Frozen (.exe): rebuilding the .exe in place is impossible while it's
+        running — Windows keeps a running executable's file locked against
+        delete/replace, and PyInstaller starts every build by wiping its
+        output folder first. So instead we hand off to updater.py, a plain
+        script (not bundled into the .exe) that runs as its OWN independent
+        process: we spawn it detached, then this process exits immediately
+        to release the lock on its own .exe file. updater.py then waits for
+        us to actually be gone, does `git pull` + rebuilds the .exe (now
+        free to overwrite) with PyInstaller, and launches the fresh build.
+        This keeps a single dist/ folder instead of needing two."""
+        if not getattr(sys, "frozen", False):
+            try:
+                pull = self._run(["git", "pull", "--ff-only"], timeout=40)
+                if pull.returncode != 0:
+                    return {"ok": False, "error": pull.stderr.strip() or pull.stdout.strip()}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+            python = sys.executable
+            os.execv(python, [python] + sys.argv)
             return {"ok": True}  # unreachable, kept for clarity
 
-        # Not frozen: there's nothing to "rebuild" — the script IS the source,
-        # so if git pull didn't succeed, relaunching would just rerun the
-        # exact same code and silently look like nothing happened.
-        if pull_error:
-            return {"ok": False, "error": pull_error}
+        project_root = self._find_project_root()
+        if not project_root:
+            return {"ok": False, "error": "Не удалось определить корень git-репозитория для обновления."}
 
-        python = sys.executable
-        os.execv(python, [python] + sys.argv)
+        updater_script = os.path.join(project_root, "updater.py")
+        if not os.path.exists(updater_script):
+            return {
+                "ok": False,
+                "error": "Не найден updater.py в корне проекта. Скачайте его туда же, где лежат "
+                         "desktop_app.py и weekly_planner.html, и попробуйте снова.",
+            }
+
+        popen_kwargs = {}
+        if sys.platform.startswith("win"):
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            popen_kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
+
+        args_tail = ["--pid", str(os.getpid()), "--project-root", project_root]
+        candidates = [
+            ["python", updater_script],
+            ["py", updater_script],
+            ["python3", updater_script],
+        ]
+        spawned = False
+        for cmd in candidates:
+            try:
+                subprocess.Popen(cmd + args_tail, cwd=project_root, **popen_kwargs)
+                spawned = True
+                break
+            except FileNotFoundError:
+                continue
+        if not spawned:
+            return {"ok": False, "error": "Не найден Python в PATH — не удалось запустить процесс обновления."}
+
+        # The updater process is now running independently of us and will
+        # outlive this process. Exit immediately (not a graceful shutdown —
+        # we don't need one) so our own .exe file is no longer locked and
+        # the updater can rebuild it.
+        os._exit(0)
         return {"ok": True}  # unreachable, kept for clarity
 
 

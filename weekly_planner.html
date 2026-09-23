@@ -1506,20 +1506,23 @@ updateBtn.addEventListener("click", async () => {
     } else if (res.gitBehind) {
       reason = "На GitHub появились новые коммиты.";
     } else if (res.staleBuild) {
-      reason = "version.json в исходниках отличается от версии, запечённой в текущем .exe (похоже, вы локально отредактировали файлы после последней сборки).";
+      reason = (res.bakedVersion === null || res.bakedVersion === undefined)
+        ? "В текущей сборке .exe не найден version.json — это старая сборка, её нужно пересобрать."
+        : "version.json в исходниках отличается от версии, запечённой в текущем .exe (похоже, вы локально отредактировали файлы после последней сборки).";
     } else {
       reason = "Доступно обновление.";
     }
     if (confirm(reason + " Установить и перезапустить приложение?")) {
       // For a plain `python desktop_app.py` run this pulls and relaunches almost
-      // instantly. For a packaged .exe it also rebuilds it from the updated
-      // source first (PyInstaller), which can genuinely take a couple of
-      // minutes — the window will just close and reopen once that's done, or
-      // this call returns with an error if something went wrong along the way.
-      updateBtn.textContent = "Обновление (может занять до пары минут)...";
-      // On success the whole process relaunches (or rebuilds+relaunches for a
-      // packaged .exe) before this ever resolves, so nothing below runs. If we
-      // DO get a response, it means it failed and didn't restart.
+      // instantly. For a packaged .exe, rebuilding it while it's running is
+      // impossible (Windows locks a running .exe's file), so instead the app
+      // hands off to a separate updater process and closes almost immediately —
+      // that separate process does the actual rebuild in the background and
+      // reopens the app once it's done (a few seconds to a couple of minutes).
+      updateBtn.textContent = "Обновление...";
+      // On success the window closes (or the interpreter relaunches, for a
+      // plain script run) before this ever resolves, so nothing below runs. If
+      // we DO get a response, it means it failed and didn't hand off/restart.
       const res2 = await window.pywebview.api.update_and_restart();
       if (res2 && res2.ok === false) {
         alert("Не удалось обновить приложение:\n" + res2.error);
